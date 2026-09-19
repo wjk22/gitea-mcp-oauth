@@ -26,7 +26,7 @@ Persistence across restarts (a restart means reconnecting the connector), consen
 **Upstream Gitea scopes** (fixed, not configurable): `read:repository read:issue read:user read:organization`. Verified enforced on Gitea 1.27.3 with the scope probe in `test/scope-probe/`.
 
 **Default client redirect URI allowlist**:
-`https://claude.ai/api/mcp/auth_callback`, `https://claude.com/api/mcp/auth_callback`, `https://chatgpt.com/connector_platform_oauth_redirect`.
+`https://claude.ai/api/mcp/auth_callback`, `https://claude.com/api/mcp/auth_callback`, `https://chatgpt.com/connector_platform_oauth_redirect`. New ChatGPT connectors use a per-connector URI `https://chatgpt.com/connector/oauth/<callback_id>`, which must be configured explicitly; the legacy URI in the defaults applies to older connectors only.
 
 ## Flow
 

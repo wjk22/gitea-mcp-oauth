@@ -125,23 +125,33 @@ curl -i https://mcp.example.com/mcp
 
 ### ChatGPT support
 
-ChatGPT support is currently **untested end to end** (Claude at claude.ai is tested and verified).
+ChatGPT works **end to end** (tested on ChatGPT Plus with developer mode enabled).
 
-#### Known Limitations and Differences
+#### Developer Mode Requirement
 
-- **Plan availability:** Custom remote MCP connectors in ChatGPT are not available on every plan. At the time of writing, ChatGPT Plus did not offer them, while Pro and Business did (reported by ChatGPT itself; not verified against official documentation).
-- **Per-connector callback URI:** New ChatGPT connectors use a per-connector callback `https://chatgpt.com/connector/oauth/{callback_id}` (source: [OpenAI Apps SDK Build Auth](https://developers.openai.com/apps-sdk/build/auth)), which must be added to `GITEA_OAUTH_ALLOWED_REDIRECT_URIS`.
-- **Client registration:** ChatGPT may use a Client ID Metadata Document (CIMD, a URL-based `client_id`) instead of Dynamic Client Registration (DCR); this server supports DCR only.
+To connect custom MCP servers, developer mode must be turned on in ChatGPT:
+**Settings → Apps & Connectors → Advanced → Developer mode** (the exact menu path is shown by ChatGPT and may change over time).
 
-#### Setup
+#### Known Differences and Notes
 
-1. Add a custom connector with URL `https://mcp.example.com/mcp`.
-2. New ChatGPT connectors show a per-connector callback URL `https://chatgpt.com/connector/oauth/{callback_id}` on their setup page. Copy it exactly and append it to `GITEA_OAUTH_ALLOWED_REDIRECT_URIS` in `.env`:
+- **Per-connector callback URI:** New ChatGPT connectors use a per-connector callback `https://chatgpt.com/connector/oauth/<callback_id>`, which must be added to `GITEA_OAUTH_ALLOWED_REDIRECT_URIS`.
+- **Client registration:** ChatGPT may use a Client ID Metadata Document (CIMD, a URL-based `client_id`) instead of Dynamic Client Registration (DCR); this server supports DCR only (ChatGPT used DCR in testing).
+
+#### Setup Flow
+
+1. In ChatGPT, add a custom connector with URL `https://mcp.example.com/mcp` and OAuth.
+2. The initial registration attempt fails with `invalid_redirect_uri` and displays the exact callback URI (`https://chatgpt.com/connector/oauth/<callback_id>`).
+3. Append that exact URI to `GITEA_OAUTH_ALLOWED_REDIRECT_URIS` in `.env`:
    ```bash
    GITEA_OAUTH_ALLOWED_REDIRECT_URIS=https://claude.ai/api/mcp/auth_callback,https://claude.com/api/mcp/auth_callback,https://chatgpt.com/connector/oauth/<callback_id>
    ```
-3. Apply the change: `docker compose up -d` (recreates the container; all sessions are lost, see below).
-4. Complete the authorization in ChatGPT.
+4. Recreate the container:
+   ```bash
+   docker compose up -d
+   ```
+   *Note:* Recreating the container clears in-memory sessions; any other connected clients (e.g. Claude) will need to reconnect.
+5. Retry adding the connector in ChatGPT. Complete authorization in Gitea; the connector will connect and list repositories.
+6. The callback ID belongs to that specific connector; creating a new connector gets a new ID. Unused IDs can be pruned from `GITEA_OAUTH_ALLOWED_REDIRECT_URIS` later.
 
 ---
 

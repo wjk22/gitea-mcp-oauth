@@ -3,7 +3,7 @@
 > [!NOTE]
 > This repository is an unofficial fork of [gitea-mcp](https://gitea.com/gitea/gitea-mcp) adding an OAuth 2.1 authorization server and strict read-only enforcement designed for remote web MCP clients (e.g. Claude, ChatGPT). It is not affiliated with or endorsed by the Gitea project. Design and security model: [docs/oauth/SPEC.md](docs/oauth/SPEC.md). See [deploy/README.md](deploy/README.md) for production deployment instructions and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 >
-> **ChatGPT support status:** ChatGPT support is untested end to end (Claude at claude.ai is tested). Custom remote MCP connectors require supported ChatGPT plans (reported by ChatGPT itself as Pro/Business rather than Plus; not verified against official documentation) and a per-connector redirect URI (`https://chatgpt.com/connector/oauth/{callback_id}`, per [OpenAI documentation](https://developers.openai.com/apps-sdk/build/auth)) which must be added to `GITEA_OAUTH_ALLOWED_REDIRECT_URIS`. In addition, ChatGPT may attempt to use Client ID Metadata Documents rather than DCR; this server supports DCR only. See [deploy/README.md](deploy/README.md#chatgpt-support) for details.
+> **ChatGPT support status:** ChatGPT works end to end (tested on Plus with developer mode enabled). New ChatGPT connectors use a per-connector callback URI (`https://chatgpt.com/connector/oauth/<callback_id>`) that must be added to the allowlist; see [deploy/README.md](deploy/README.md#chatgpt-support).
 
 [繁體中文](README.zh-tw.md) | [简体中文](README.zh-cn.md)
 
@@ -31,7 +31,7 @@ Pass the Gitea host and access token as command-line flags or environment variab
 
 The server supports MCP up to `2026-07-28` and negotiates down to the client's version, advertising only the `tools` capability. Tool and Gitea failures return a `tools/call` result with `result.isError: true`, while malformed requests and server faults stay JSON-RPC errors.
 
-HTTP is always stateless: `/mcp` accepts POST only, without `Mcp-Session-Id`, standalone SSE or `Last-Event-ID` resumability. Origins are validated, and reverse proxies must forward `Mcp-Protocol-Version`, `Mcp-Method` and `Mcp-Name` unchanged. `Authorization: Bearer <token>` and `Authorization: token <token>` pass a Gitea credential per request, which is credential passthrough rather than MCP OAuth.
+HTTP is always stateless: `/mcp` accepts POST only, without `Mcp-Session-Id`, standalone SSE or `Last-Event-ID` resumability. Origins are validated, and reverse proxies must forward `Mcp-Protocol-Version`, `Mcp-Method` and `Mcp-Name` unchanged. `Authorization: Bearer <token>` and `Authorization: token <token>` pass a Gitea credential per request, which is credential passthrough rather than MCP OAuth, unless OAuth mode is enabled, in which case gitea-mcp acts as an OAuth 2.1 authorization server; see [docs/oauth/SPEC.md](docs/oauth/SPEC.md).
 
 HTTP mode also serves `/healthz`, which returns `200 OK` when the server is up. The Docker image's built-in `HEALTHCHECK` runs `gitea-mcp -healthcheck`, which dials `http://127.0.0.1:<port>/healthz` using the same `-p`/`-port` value (or `8080` by default) and exits `0` on success or `1` on failure. Stdio deployments do not serve `/healthz`, so override or disable the image's `HEALTHCHECK` when running in stdio mode.
 
