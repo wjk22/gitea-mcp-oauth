@@ -1,0 +1,96 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      # The R2 upload only runs after goreleaser has already published
+      # the Gitea release, so fail early instead if the secrets are
+      # missing.
+      - name: Check R2 configuration
+        run: sh scripts/upload-r2.sh --check-config
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+      - name: Install GoReleaser
+        run: go install github.com/goreleaser/goreleaser/v2@latest
+      - name: Run GoReleaser
+        run: goreleaser release --clean
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_FORCE_TOKEN: "gitea"
+      # goreleaser `publishers:` is a Pro-only feature, so the release
+      # artifacts are mirrored to Cloudflare R2 here instead.
+      - name: Upload binaries to Cloudflare R2
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          for f in dist/*.tar.gz dist/*.zip dist/checksums.txt; do
+            [ -f "$f" ] || continue
+            echo "uploading $f"
+            sh scripts/upload-r2.sh "$f" "gitea-mcp/${VERSION#v}/$(basename "$f")"
+          done
+
+  release-image:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_ORG: gitea
+      DOCKER_LATEST: latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0 # all history for all branches and tags
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
+
+      - name: Set up Docker BuildX
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Login to DockerHub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Get Meta
+        id: meta
+        run: |
+          echo REPO_NAME=$(echo ${GITHUB_REPOSITORY} | awk -F"/" '{print $2}') >> $GITHUB_OUTPUT
+          echo REPO_VERSION=${GITHUB_REF_NAME#v} >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: |
+            linux/amd64
+            linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.REPO_VERSION }}
+          tags: |
+            ${{ env.DOCKER_ORG }}/${{ steps.meta.outputs.REPO_NAME }}-server:${{ steps.meta.outputs.REPO_VERSION }}
+            ${{ env.DOCKER_ORG }}/${{ steps.meta.outputs.REPO_NAME }}-server:${{ env.DOCKER_LATEST }}

@@ -1,0 +1,39 @@
+{
+  // 💡 Inputs are prompted on first server start, then stored securely by VS Code.
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "gitea-host",
+      "description": "Gitea Host",
+      "password": false
+    },
+    {
+      "type": "promptString",
+      "id": "gitea-token",
+      "description": "Gitea Access Token",
+      "password": true
+    },
+    {
+      "type": "promptString",
+      "id": "gitea-insecure",
+      "description": "Allow insecure connections (e.g., self-signed certificates)",
+      "default": "false"
+    }
+  ],
+  "servers": {
+    "gitea-mcp-stdio": {
+      "type": "stdio",
+      "command": "gitea-mcp",
+      "args": ["-t", "stdio"],
+          "env": {
+            "GITEA_HOST": "${input:gitea-host}",
+            "GITEA_ACCESS_TOKEN": "${input:gitea-token}",
+            "GITEA_INSECURE": "${input:gitea-insecure}"
+          }
+    },
+    "gitea-mcp-http": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+    }
+  }
+}

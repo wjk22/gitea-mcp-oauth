@@ -1,0 +1,9 @@
+.idea
+gitea-mcp
+gitea-mcp.exe
+*.log
+tmp
+.env
+deploy/.env
+*.key
+*.secret
