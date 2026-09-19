@@ -1,36 +1,193 @@
-# Gitea MCP 伺服器
+# Gitea MCP OAuth
+
+**透過 OAuth 将 ChatGPT 和 Claude 連線到自行託管 Gitea —— 并提供强制唯讀存取。**
+
+> [!NOTE]
+> 本儲存庫是官方 [Gitea MCP Server](https://gitea.com/gitea/gitea-mcp) 的非官方分支。它为 ChatGPT、Claude 等遠端 Web MCP 用戶端新增了 OAuth 授權伺服器和嚴格的唯讀强制机制。本專案与 Gitea 專案无隶属关系，也未获得其官方背书。
+>
+> 設計与安全模型：[`docs/oauth/SPEC.md`](docs/oauth/SPEC.md)  
+> 部署指南：[`deploy/README.md`](deploy/README.md)
 
 [English](README.md) | [简体中文](README.zh-cn.md)
 
-**Gitea MCP 伺服器** 將 [Gitea](https://about.gitea.com) 實例接入 [Model Context Protocol](https://modelcontextprotocol.io) 客戶端，讓倉庫、問題、拉取請求等都能在相容 MCP 的聊天介面中瀏覽與管理。
+## 為什麼有這個專案
 
-[![在 VS Code 中使用 Docker 安裝](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=gitea&inputs=[{%22id%22:%22gitea_token%22,%22type%22:%22promptString%22,%22description%22:%22Gitea%20Personal%20Access%20Token%22,%22password%22:true}]&config={%22command%22:%22docker%22,%22args%22:[%22run%22,%22-i%22,%22--rm%22,%22-e%22,%22GITEA_ACCESS_TOKEN%22,%22docker.gitea.com/gitea-mcp-server%22],%22env%22:{%22GITEA_ACCESS_TOKEN%22:%22${input:gitea_token}%22}}) [![在 VS Code Insiders 中使用 Docker 安裝](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=gitea&inputs=[{%22id%22:%22gitea_token%22,%22type%22:%22promptString%22,%22description%22:%22Gitea%20Personal%20Access%20Token%22,%22password%22:true}]&config={%22command%22:%22docker%22,%22args%22:[%22run%22,%22-i%22,%22--rm%22,%22-e%22,%22GITEA_ACCESS_TOKEN%22,%22docker.gitea.com/gitea-mcp-server%22],%22env%22:{%22GITEA_ACCESS_TOKEN%22:%22${input:gitea_token}%22}}&quality=insiders)
+官方 Gitea MCP Server 很适合本機 MCP 用戶端和個人存取令牌（PAT）。但 ChatGPT、Claude 这类遠端 Web 用戶端需要一个支援 OAuth 的 MCP 端點。
 
-## 安裝
+此分支补上了這一層。
 
-可從 [發布頁面](https://gitea.com/gitea/gitea-mcp/releases) 下載二進位檔並放入 `PATH`，或使用 `docker.gitea.com/gitea-mcp-server` 映像檔，也可用 `make` 與 Go 1.27 以上從原始碼建置到 `$GOPATH/bin`：
+它適合希望让 AI 助手檢查儲存庫、Issue、Pull Request、Commit、Release 和其他 Gitea 資料，同时**不授予这些助手寫入權限**的使用者。
 
-```bash
-git clone https://gitea.com/gitea/gitea-mcp.git
-cd gitea-mcp
-make install
+## 主要特性
+
+- 支援 **ChatGPT 自定义 MCP Connector**
+- 支援 **Claude Web Connector**
+- 使用带 **PKCE** 的 OAuth 流程
+- 支援 Web MCP 用戶端的动态用戶端注册
+- OAuth 模式**始终唯讀**
+- OAuth 模式下不會暴露可修改資料的 MCP 工具
+- 发往 Gitea 的請求还会经过唯讀 HTTP Transport 保护
+- 单使用者允许清單
+- Gitea 憑證始终保留在伺服器端
+- 無狀態 MCP HTTP Transport
+- 包含 Docker 部署設定
+- 包含反向代理設定
+- OAuth 模式之外仍保留原有 PAT/stdio 行為
+
+## 安全模型
+
+OAuth 模式刻意維持一个很窄的信任邊界。
+
+Web 用戶端取得的是 MCP Access Token，而不是你的 Gitea OAuth Token。
+
+唯讀存取透過多層機制強制執行：
+
+1. Gitea OAuth 唯讀 Scope
+2. 排除具備寫入能力的 MCP 工具
+3. 发往 Gitea 的 HTTP 請求僅允許安全的唯讀方法
+4. OAuth 模式無法切換为写模式
+
+因此，ChatGPT 或 Claude 可以檢查 Gitea 中的資料，但无法透過 MCP Server 修改儲存庫。
+
+> [!IMPORTANT]
+> 唯讀存取仍然代表用戶端可以讀取儲存庫內容。不要授權包含你不希望 AI 用戶端讀取的秘密資訊的儲存庫。
+
+## 已測試用戶端
+
+| 用戶端 | 狀態 |
+|---|---|
+| ChatGPT Web 自定义 MCP Connector | ✅ 可用 |
+| Claude Web Connector | ✅ 可用 |
+| 本機 MCP 用戶端 / PAT 模式 | ✅ 与上游相容 |
+
+## 快速開始
+
+### 1. 建立 Gitea OAuth 應用程式
+
+在 Gitea 中建立 OAuth2 應用程式，并将 Callback 設為：
+
+```text
+https://your-mcp-host.example/oauth/callback
 ```
 
-## 設定
+### 2. 設定伺服器
 
-Gitea 主機與存取令牌可透過命令列參數或環境變數提供，命令列參數優先。執行 `gitea-mcp --help` 可查看完整的參數與環境變數列表。日誌寫入 `$HOME/.gitea-mcp/gitea-mcp.log`，加上 `-d` 可啟用除錯日誌。
+複製部署範例：
 
-### MCP 協定與 HTTP 傳輸
+```bash
+cp deploy/.env.example deploy/.env
+```
 
-伺服器支援最高至 `2026-07-28` 的 MCP 協定，並向下協商到客戶端的版本，僅宣告 `tools` 能力。工具與 Gitea 執行失敗會在 `tools/call` 結果中回傳並設定 `result.isError: true`，格式錯誤的請求與伺服器故障仍回傳 JSON-RPC 錯誤。
+至少設定：
 
-HTTP 傳輸固定為無狀態：`/mcp` 只接受 POST，沒有 `Mcp-Session-Id`、獨立 SSE 與 `Last-Event-ID` 斷點續傳。伺服器會驗證來源，反向代理必須原樣轉發 `Mcp-Protocol-Version`、`Mcp-Method` 與 `Mcp-Name`。`Authorization: Bearer <令牌>` 與 `Authorization: token <令牌>` 會在每次請求中傳遞 Gitea 憑證，這是憑證透傳，而不是 MCP OAuth。
+```text
+GITEA_HOST=https://git.example.com
+GITEA_OAUTH_CLIENT_ID=...
+GITEA_OAUTH_PUBLIC_URL=https://mcp.example.com
+GITEA_OAUTH_ALLOWED_USER=your-user
+```
 
-HTTP 模式也會提供 `/healthz` 端點，伺服器正常運作時回傳 `200 OK`。Docker 映像內建的 `HEALTHCHECK` 會執行 `gitea-mcp -healthcheck`，它使用與 `-p`/`-port` 相同的連接埠（預設 `8080`）連線 `http://127.0.0.1:<連接埠>/healthz`，成功時結束碼為 `0`，失敗時為 `1`。stdio 部署不會提供 `/healthz`，因此在 stdio 模式下運作時應覆寫或停用映像內建的 `HEALTHCHECK`。
+使用提供的 Docker Secret 檔案儲存 OAuth Client Secret 和 Signing Key。
+
+### 3. 啟動
+
+```bash
+cd deploy
+docker compose up -d
+```
+
+MCP 端點为：
+
+```text
+https://mcp.example.com/mcp
+```
+
+### 4. 連線 ChatGPT
+
+建立自定义 MCP App/Connector：
+
+```text
+Server URL: https://mcp.example.com/mcp
+Authentication: OAuth
+```
+
+然后完成 Gitea 登入流程。
+
+### 5. 連線 Claude
+
+将同一个 MCP 端點添加为自定义 Connector，并透過 Gitea 完成驗證。
+
+## ChatGPT Callback 說明
+
+較新的 ChatGPT Connector 会使用每个 Connector 獨立的 Callback URI，格式如下：
+
+```text
+https://chatgpt.com/connector/oauth/<callback_id>
+```
+
+你的部署必須允許 Connector 所需的 Callback URI 格式。目前部署細節请参阅 [`deploy/README.md`](deploy/README.md)。
+
+## 部署
+
+完整的 Docker、反向代理、TLS、OAuth 与疑難排解說明见 [`deploy/README.md`](deploy/README.md)。
+
+## 与上游專案的差異
+
+本儲存庫基於官方 Gitea MCP Server：
+
+https://gitea.com/gitea/gitea-mcp
+
+此分支新增了：
+
+- 面向 Web MCP 用戶端的 OAuth 授權伺服器功能
+- PKCE 与动态用戶端注册
+- Web 用戶端 Redirect URI 相容
+- 单使用者授權
+- 强制唯讀 OAuth 模式
+- OAuth 專用安全测试
+- 用于遠端 MCP 的 Docker / 反向代理部署範例
+
+在可行的情況下，原有 Gitea MCP 的本機/PAT 行為保持不變。
+
+## OAuth 模式
+
+啟用 OAuth 模式后，伺服器会强制唯讀。不存在可以在 OAuth 模式下啟用写工具的設定開關。
+
+支援 OAuth 的伺服器会暴露相容 Web MCP 用戶端所需的 Metadata 与 Authorization Endpoint，同时将上游 Gitea OAuth 憑證保留在伺服器端。
+
+## MCP 協定与 HTTP Transport
+
+伺服器支援最高 `2026-07-28` 版本的 MCP，并会向下協商到用戶端支援的版本，只宣告 `tools` Capability。
+
+HTTP 模式是無狀態的。MCP 端點为：
+
+```text
+/mcp
+```
+
+在 OAuth 模式下，`/mcp` 由本伺服器签发的 MCP Access Token 保护。
+
+在 OAuth 模式之外，原有的 PAT HTTP 与 stdio 行為仍可使用。
+
+HTTP 模式也提供：
+
+```text
+/healthz
+```
+
+Docker 映像包含內建 Health Check，会執行：
+
+```text
+gitea-mcp -healthcheck
+```
+
+并檢查 `http://127.0.0.1:<port>/healthz`。
+
+## 本機 / 上游相容用法
+
+对于本機用戶端和基於 PAT 的工作流程，本專案保留原有 Gitea MCP 行為。
 
 ### Claude Code
-
-透過 `go run` 執行伺服器，需要安裝 [Go](https://go.dev)：
 
 ```bash
 claude mcp add --transport stdio --scope user gitea \
@@ -41,7 +198,7 @@ claude mcp add --transport stdio --scope user gitea \
 
 ### VS Code
 
-可使用本 README 頂部的安裝按鈕，或將下面的內容加入使用者設定 (JSON)，按 `Ctrl + Shift + P` 並輸入 `Preferences: Open User Settings (JSON)` 即可開啟。也可放在工作區的 `.vscode/mcp.json` 中，此時不需要 `mcp` 鍵。
+基於 PAT 的上游風格本機 Docker 設定仍可使用：
 
 ```json
 {
@@ -50,7 +207,7 @@ claude mcp add --transport stdio --scope user gitea \
       {
         "type": "promptString",
         "id": "gitea_token",
-        "description": "Gitea 個人存取令牌",
+        "description": "Gitea Personal Access Token",
         "password": true
       }
     ],
@@ -69,40 +226,22 @@ claude mcp add --transport stdio --scope user gitea \
 
 ### OpenCode
 
-將下面的內容加入 [OpenCode](https://opencode.ai) 設定的頂層 `mcp` 物件：
-
 ```json
-    "gitea-mcp": {
-      "enabled": true,
-      "type": "local",
-      "command": [
-        "gitea-mcp",
-        "-t", "stdio",
-        "-H", "https://gitea.com",
-        "-T", "<your personal access token>"
-      ]
-    }
+"gitea-mcp": {
+  "enabled": true,
+  "type": "local",
+  "command": [
+    "gitea-mcp",
+    "-t", "stdio",
+    "-H", "https://gitea.com",
+    "-T", "<your personal access token>"
+  ]
+}
 ```
 
-### Mistral Vibe
+### 其他用戶端
 
-將下面的內容加入 `~/.vibe/config.toml`：
-
-```toml
-[[mcp_servers]]
-name = "gitea"
-transport = "stdio"
-command = "docker"
-args = ["run", "--rm", "-i", "-e", "GITEA_ACCESS_TOKEN", "-e", "GITEA_HOST", "docker.gitea.com/gitea-mcp-server"]
-
-[mcp_servers.env]
-GITEA_ACCESS_TOKEN = "TOKEN"
-GITEA_HOST = "https://gitea.com"
-```
-
-### 其他客戶端
-
-Cursor 等客戶端可使用 stdio 命令：
+本機 stdio 設定可以類似這樣：
 
 ```json
 {
@@ -118,7 +257,7 @@ Cursor 等客戶端可使用 stdio 命令：
 }
 ```
 
-或使用 http 端點，對應以 `gitea-mcp -t http --port 8080` 啟動的伺服器：
+非 OAuth HTTP 模式可以这样設定：
 
 ```json
 {
@@ -133,75 +272,162 @@ Cursor 等客戶端可使用 stdio 命令：
 }
 ```
 
-設定完成後，可在聊天框輸入 `列出我所有的倉庫` 試試。
+## 安裝與建置
+
+### OAuth 部署
+
+OAuth 模式需要从本儲存庫建置。請參閱 [`deploy/README.md`](deploy/README.md)。
+
+### 從原始碼建置
+
+需要 Go 1.27 或更高版本：
+
+```bash
+git clone https://github.com/wjk22/gitea-mcp-oauth.git
+cd gitea-mcp-oauth
+make install
+```
+
+### 上游二進位与映像
+
+如果你只需要原有的本機/PAT 行為，官方上游專案也提供自己的二進位檔案和 Docker 映像：
+
+https://gitea.com/gitea/gitea-mcp
+
+这些上游建置**不包含**此分支新增的 OAuth 功能。
+
+## 設定
+
+可以透過命令列參數或環境變數传入 Gitea Host 与 Access Token；命令列參數優先。
+
+執行：
+
+```bash
+gitea-mcp --help
+```
+
+查看完整選項。
+
+記錄寫入：
+
+```text
+$HOME/.gitea-mcp/gitea-mcp.log
+```
+
+使用 `-d` 啟用 Debug Logging。
+
+## 工具篩選
+
+伺服器執行在唯讀模式（`-r` / `GITEA_READONLY`）时，所有 `Write` 工具都會被隱藏。
+
+也可以依 Scope 过滤暴露的工具：
+
+```bash
+gitea-mcp -S issue,pull_request
+```
+
+或者按單一工具名稱过滤：
+
+```bash
+gitea-mcp --scope repository,branch --tools get_me
+```
+
+若兩種篩選皆未設定，則載入目前執行模式允許的所有工具。
 
 ## 可用工具
 
-| 工具                         | 範圍         | 存取 | 描述 |
-| :--------------------------- | :----------- | :--- | :--- |
-| get_gitea_mcp_server_version | version      | 讀取 | 取得 Gitea MCP 伺服器版本 |
-| get_me                       | user         | 讀取 | 取得目前已認證用戶 |
-| get_user_orgs                | user         | 讀取 | 列出目前用戶的組織 |
-| search_users                 | search       | 讀取 | 搜尋用戶 |
-| search_org_teams             | search       | 讀取 | 搜尋組織中的團隊 |
-| search_repos                 | search       | 讀取 | 搜尋倉庫 |
-| search_issues                | search       | 讀取 | 跨倉庫搜尋問題和拉取請求 |
-| notification_read            | notification | 讀取 | 讀取通知：列出（可限定倉庫）或依 ID 取得會話 |
-| notification_write           | notification | 寫入 | 將某條或全部通知標記為已讀 |
-| label_read                   | label        | 讀取 | 讀取倉庫或組織標籤 |
-| label_write                  | label        | 寫入 | 寫入標籤（倉庫或組織）：創建、編輯、刪除 |
-| milestone_read               | milestone    | 讀取 | 讀取里程碑：取得單個或列出 |
-| milestone_write              | milestone    | 寫入 | 寫入里程碑：創建、更新、刪除 |
-| wiki_read                    | wiki         | 讀取 | 讀取 Wiki：列出頁面、取得內容、修訂歷史 |
-| wiki_write                   | wiki         | 寫入 | 寫入 Wiki 頁面：創建、更新、刪除 |
-| timetracking_read            | timetracking | 讀取 | 讀取時間追蹤：問題/倉庫耗時、活動計時器、我的追蹤記錄 |
-| timetracking_write           | timetracking | 寫入 | 寫入時間追蹤：計時器和記錄項目 |
-| package_read                 | packages     | 讀取 | 讀取軟體套件註冊表：列出套件、列出版本或取得某個版本 |
-| package_write                | packages     | 寫入 | 刪除軟體套件版本（不可復原） |
-| list_issues                  | issue        | 讀取 | 列出倉庫問題 |
-| attachment_read              | issue        | 讀取 | 讀取問題/評論附件：列出中繼資料、取得中繼資料或下載內容 |
-| issue_read                   | issue        | 讀取 | 讀取問題：詳情、評論或標籤 |
-| issue_write                  | issue        | 寫入 | 寫入問題：創建、更新、管理評論和標籤 |
-| list_pull_requests           | pull_request | 讀取 | 列出倉庫拉取請求 |
-| pull_request_read            | pull_request | 讀取 | 讀取拉取請求：詳情、差異、變更檔案、頭部提交狀態、審查、審查評論 |
-| pull_request_write           | pull_request | 寫入 | 寫入拉取請求：創建、更新、關閉、重新開啟、合併、更新分支、管理審查者 |
-| pull_request_review_write    | pull_request | 寫入 | 寫入 PR 審查：創建、提交、刪除、駁回、回覆和解決審查評論 |
-| actions_config_read          | actions      | 讀取 | 讀取 Actions 密鑰和變數 |
-| actions_config_write         | actions      | 寫入 | 寫入 Actions 密鑰和變數：更新插入、創建、更新、刪除 |
-| actions_run_read             | actions      | 讀取 | 讀取 Actions 工作流程、執行、作業、日誌和產物 |
-| actions_run_write            | actions      | 寫入 | 寫入 Actions 執行：觸發、取消、重新執行 |
-| create_repo                  | repository   | 寫入 | 創建新倉庫 |
-| fork_repo                    | repository   | 寫入 | 復刻倉庫 |
-| list_my_repos                | repository   | 讀取 | 列出目前用戶擁有的倉庫 |
-| list_org_repos               | repository   | 讀取 | 列出組織中的倉庫 |
-| get_repository_tree          | repository   | 讀取 | 取得倉庫檔案樹 |
-| get_file_contents            | file         | 讀取 | 取得檔案內容與中繼資料 |
-| get_dir_contents             | file         | 讀取 | 取得目錄中的項目 |
-| create_or_update_file        | file         | 寫入 | 創建或更新檔案（提供 sha 以更新現有檔案） |
-| delete_file                  | file         | 寫入 | 刪除檔案 |
-| create_branch                | branch       | 寫入 | 創建新分支 |
-| delete_branch                | branch       | 寫入 | 刪除分支 |
-| list_branches                | branch       | 讀取 | 列出倉庫分支 |
-| rename_branch                | branch       | 寫入 | 重新命名分支 |
-| create_tag                   | tag          | 寫入 | 創建標籤 |
-| delete_tag                   | tag          | 寫入 | 刪除標籤 |
-| get_tag                      | tag          | 讀取 | 取得標籤詳情 |
-| list_tags                    | tag          | 讀取 | 列出倉庫標籤 |
-| list_commits                 | commit       | 讀取 | 列出倉庫提交 |
-| get_commit                   | commit       | 讀取 | 取得提交詳情 |
-| create_release               | release      | 寫入 | 創建版本發布 |
-| delete_release               | release      | 寫入 | 刪除版本發布 |
-| get_release                  | release      | 讀取 | 依 ID 取得版本發布 |
-| get_latest_release           | release      | 讀取 | 取得最新版本發布 |
-| list_releases                | release      | 讀取 | 列出倉庫版本發布 |
+| 工具 | Scope | 權限 | 說明 |
+| :--- | :--- | :--- | :--- |
+| get_gitea_mcp_server_version | version | 讀取 | 取得 Gitea MCP Server 版本 |
+| get_me | user | 讀取 | 取得目前驗證使用者 |
+| get_user_orgs | user | 讀取 | 列出目前使用者所属組織 |
+| search_users | search | 讀取 | 搜尋使用者 |
+| search_org_teams | search | 讀取 | 搜尋組織内的 Team |
+| search_repos | search | 讀取 | 搜尋儲存庫 |
+| search_issues | search | 讀取 | 跨儲存庫搜尋 Issue 和 Pull Request |
+| notification_read | notification | 讀取 | 讀取通知：列出通知或按 ID 取得 Thread |
+| notification_write | notification | 寫入 | 将一个或全部通知標記為已讀 |
+| label_read | label | 讀取 | 讀取儲存庫或組織 Label |
+| label_write | label | 寫入 | 建立、編輯或刪除儲存庫/組織 Label |
+| milestone_read | milestone | 讀取 | 取得或列出 Milestone |
+| milestone_write | milestone | 寫入 | 建立、更新或刪除 Milestone |
+| wiki_read | wiki | 讀取 | 讀取 Wiki 頁面及修订历史 |
+| wiki_write | wiki | 寫入 | 建立、更新或刪除 Wiki 頁面 |
+| timetracking_read | timetracking | 讀取 | 讀取 Issue/儲存庫時間記錄、Stopwatch 和個人時間記錄 |
+| timetracking_write | timetracking | 寫入 | 寫入 Stopwatch 和時間記錄 |
+| package_read | packages | 讀取 | 讀取 Package Registry：Package、Version 等 |
+| package_write | packages | 寫入 | 刪除 Package Version（不可逆） |
+| list_issues | issue | 讀取 | 列出儲存庫 Issue |
+| attachment_read | issue | 讀取 | 讀取 Issue/Comment Attachment 的 Metadata 或內容 |
+| issue_read | issue | 讀取 | 讀取 Issue、Comment 和 Label |
+| issue_write | issue | 寫入 | 建立/更新 Issue、管理 Comment 与 Label |
+| list_pull_requests | pull_request | 讀取 | 列出 Pull Request |
+| pull_request_read | pull_request | 讀取 | 讀取 PR 詳細資料、Diff、檔案、Status、Review 和 Comment |
+| pull_request_write | pull_request | 寫入 | 建立、更新、關閉、重新開啟或合併 PR，并管理 Reviewer |
+| pull_request_review_write | pull_request | 寫入 | 建立、Commit、刪除或驳回 PR Review，并处理 Review Comment |
+| actions_config_read | actions | 讀取 | 讀取 Actions Secret 和 Variable |
+| actions_config_write | actions | 寫入 | 寫入 Actions Secret 和 Variable |
+| actions_run_read | actions | 讀取 | 讀取 Workflow、Run、Job、Log 与 Artifact |
+| actions_run_write | actions | 寫入 | Dispatch、Cancel 或 Rerun Actions Run |
+| create_repo | repository | 寫入 | 建立儲存庫 |
+| fork_repo | repository | 寫入 | Fork 儲存庫 |
+| list_my_repos | repository | 讀取 | 列出目前使用者拥有的儲存庫 |
+| list_org_repos | repository | 讀取 | 列出組織儲存庫 |
+| get_repository_tree | repository | 讀取 | 取得儲存庫檔案树 |
+| get_file_contents | file | 讀取 | 取得檔案內容与 Metadata |
+| get_dir_contents | file | 讀取 | 取得目錄內容 |
+| create_or_update_file | file | 寫入 | 建立或更新檔案 |
+| delete_file | file | 寫入 | 刪除檔案 |
+| create_branch | branch | 寫入 | 建立 Branch |
+| delete_branch | branch | 寫入 | 刪除 Branch |
+| list_branches | branch | 讀取 | 列出 Branch |
+| rename_branch | branch | 寫入 | 重新命名 Branch |
+| create_tag | tag | 寫入 | 建立 Tag |
+| delete_tag | tag | 寫入 | 刪除 Tag |
+| get_tag | tag | 讀取 | 取得 Tag 詳細資料 |
+| list_tags | tag | 讀取 | 列出 Tag |
+| list_commits | commit | 讀取 | 列出 Commit |
+| get_commit | commit | 讀取 | 取得 Commit 詳細資料 |
+| create_release | release | 寫入 | 建立 Release |
+| delete_release | release | 寫入 | 刪除 Release |
+| get_release | release | 讀取 | 按 ID 取得 Release |
+| get_latest_release | release | 讀取 | 取得最新 Release |
+| list_releases | release | 讀取 | 列出 Release |
 
-> **說明：** 部分工具是聚合的、基於操作的工具，單個工具透過 `method` 參數暴露多個操作。當伺服器以唯讀模式執行時（`-r` / `GITEA_READONLY`），存取為「寫入」的工具會被隱藏；可透過 `-S` / `--scope`（`GITEA_SCOPES`）依範圍過濾，或透過 `-O` / `--tools`（`GITEA_TOOLS`）依工具名稱過濾對外暴露的工具集合。
+> **說明：** 若干工具採用合併后的 Action-Based 設計，一個工具透過 `method` 参数暴露多個操作。伺服器執行在唯讀模式（`-r` / `GITEA_READONLY`）时，带 `Write` 權限的工具会被隐藏。还可以透過 `-S` / `--scope`（`GITEA_SCOPES`）以及 `-O` / `--tools`（`GITEA_TOOLS`）限制暴露的工具集合。
 
-未設定任一參數時，會載入所有工具；僅設定 `--scope` 時，會載入這些範圍內的所有工具；僅設定 `--tools` 時，只會載入指定名稱的工具；兩者皆設定時，會載入所選範圍的工具與指定工具名稱的聯集。範圍名稱即上表「範圍」欄中的值，未知的範圍名稱僅會在啟動時發出警告並被忽略。
+如果两种过滤都未設定，則載入目前模式允许的全部工具。`--scope` 僅載入 Scope 列中符合的工具；`--tools` 僅載入指定名稱的工具；同时使用时会加载两者的聯集。未知 Scope 会在啟動时產生警告并被忽略。
 
 ```bash
 gitea-mcp -S issue,pull_request
 gitea-mcp --scope repository,branch --tools get_me
 ```
 
-許多工具支援 `page` 和 `per_page` 分頁參數。最大有效頁面大小由 Gitea 伺服器的 `[api].MAX_RESPONSE_ITEMS` 設定決定（預設 **50**），超出的值會被靜默截斷。
+許多工具支援 `page` 和 `per_page` 分頁參數。實際最大 Page Size 受 Gitea Server `[api].MAX_RESPONSE_ITEMS` 設定限制（默认 **50**），更大的值会被靜默截斷。
+
+## 安全說明
+
+主要安全目標：
+
+- Gitea Token 永遠不會離開 MCP Server
+- OAuth 模式始终唯讀
+- Web 用戶端取得的是 MCP Token，而不是上游 Gitea Credential
+- Redirect URI 會被驗證
+- 强制使用 PKCE
+- 只有設定的 Gitea 使用者可以完成授權
+- 在 MCP Tool Layer 之下仍有唯讀保护
+- OAuth 与 PAT 模式不會靜默混用
+
+目前設計见 [`docs/oauth/SPEC.md`](docs/oauth/SPEC.md)。
+
+## License
+
+本專案基於官方 Gitea MCP Server，并繼續使用 MIT License。
+
+請參閱 [`LICENSE`](LICENSE)。
+
+## 上游專案
+
+官方專案：
+
+https://gitea.com/gitea/gitea-mcp

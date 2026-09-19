@@ -1,43 +1,193 @@
-# Gitea MCP Server
+# Gitea MCP OAuth
+
+**Connect ChatGPT and Claude to self-hosted Gitea through OAuth — with hard read-only access.**
 
 > [!NOTE]
-> This repository is an unofficial fork of [gitea-mcp](https://gitea.com/gitea/gitea-mcp) adding an OAuth 2.1 authorization server and strict read-only enforcement designed for remote web MCP clients (e.g. Claude, ChatGPT). It is not affiliated with or endorsed by the Gitea project. Design and security model: [docs/oauth/SPEC.md](docs/oauth/SPEC.md). See [deploy/README.md](deploy/README.md) for production deployment instructions and [SECURITY.md](SECURITY.md) for vulnerability reporting.
+> This repository is an unofficial fork of the official [Gitea MCP Server](https://gitea.com/gitea/gitea-mcp). It adds an OAuth authorization server and strict read-only enforcement for remote web MCP clients such as ChatGPT and Claude. It is not affiliated with or endorsed by the Gitea project.
 >
-> **ChatGPT support status:** ChatGPT works end to end (tested on Plus with developer mode enabled). New ChatGPT connectors use a per-connector callback URI (`https://chatgpt.com/connector/oauth/<callback_id>`) that must be added to the allowlist; see [deploy/README.md](deploy/README.md#chatgpt-support).
+> Design and security model: [`docs/oauth/SPEC.md`](docs/oauth/SPEC.md)  
+> Deployment guide: [`deploy/README.md`](deploy/README.md)
 
 [繁體中文](README.zh-tw.md) | [简体中文](README.zh-cn.md)
 
-**Gitea MCP Server** connects a [Gitea](https://about.gitea.com) instance to [Model Context Protocol](https://modelcontextprotocol.io) clients, so repositories, issues, pull requests and more can be browsed and managed from an MCP-compatible chat interface.
+## Why this exists
 
-[![Install with Docker in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=gitea&inputs=[{%22id%22:%22gitea_token%22,%22type%22:%22promptString%22,%22description%22:%22Gitea%20Personal%20Access%20Token%22,%22password%22:true}]&config={%22command%22:%22docker%22,%22args%22:[%22run%22,%22-i%22,%22--rm%22,%22-e%22,%22GITEA_ACCESS_TOKEN%22,%22docker.gitea.com/gitea-mcp-server%22],%22env%22:{%22GITEA_ACCESS_TOKEN%22:%22${input:gitea_token}%22}}) [![Install with Docker in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=gitea&inputs=[{%22id%22:%22gitea_token%22,%22type%22:%22promptString%22,%22description%22:%22Gitea%20Personal%20Access%20Token%22,%22password%22:true}]&config={%22command%22:%22docker%22,%22args%22:[%22run%22,%22-i%22,%22--rm%22,%22-e%22,%22GITEA_ACCESS_TOKEN%22,%22docker.gitea.com/gitea-mcp-server%22],%22env%22:{%22GITEA_ACCESS_TOKEN%22:%22${input:gitea_token}%22}}&quality=insiders)
+The official Gitea MCP server works well with local MCP clients and personal access tokens. Remote web clients such as ChatGPT and Claude, however, need an OAuth-capable MCP endpoint.
 
-## Installation
+This fork adds that missing layer.
 
-OAuth mode requires building from this repository; see [deploy/README.md](deploy/README.md).
+It is for people who want AI assistants to inspect repositories, issues, pull requests, commits, releases and other Gitea data **without giving those assistants write access**.
 
-Download a binary from the [releases page](https://gitea.com/gitea/gitea-mcp/releases) and put it in your `PATH`, use the `docker.gitea.com/gitea-mcp-server` image, or build from source into `$GOPATH/bin` with `make` and Go 1.27 or later:
+## Highlights
 
-```bash
-git clone https://gitea.com/gitea/gitea-mcp.git
-cd gitea-mcp
-make install
+- Works with **ChatGPT custom MCP connectors**
+- Works with **Claude web connectors**
+- OAuth flow with **PKCE**
+- Dynamic client registration for web MCP clients
+- OAuth mode is **always read-only**
+- Mutating MCP tools are hidden in OAuth mode
+- Outbound Gitea requests are guarded by a read-only HTTP transport
+- Single-user allowlist
+- Gitea credentials stay server-side
+- Stateless MCP HTTP transport
+- Docker deployment included
+- Reverse-proxy configuration included
+- Existing PAT/stdio behavior remains available outside OAuth mode
+
+## Security model
+
+OAuth mode intentionally has a narrow trust boundary.
+
+The web client receives an MCP access token, not your Gitea OAuth token.
+
+Read-only access is enforced in multiple layers:
+
+1. Gitea OAuth read scopes
+2. write-capable MCP tools are excluded
+3. outbound Gitea HTTP requests are restricted to read-safe methods
+4. OAuth mode cannot be switched into write mode
+
+The result is a connector that allows ChatGPT or Claude to inspect Gitea while preventing repository modification through the MCP server.
+
+> [!IMPORTANT]
+> Read-only access still exposes repository contents. Do not authorize repositories containing secrets you would not want an AI client to read.
+
+## Tested clients
+
+| Client | Status |
+|---|---|
+| ChatGPT web custom MCP connector | ✅ Working |
+| Claude web connector | ✅ Working |
+| Local MCP clients / PAT mode | ✅ Upstream-compatible |
+
+## Quick start
+
+### 1. Create a Gitea OAuth application
+
+Create an OAuth2 application in Gitea with callback:
+
+```text
+https://your-mcp-host.example/oauth/callback
 ```
 
-## Configuration
+### 2. Configure the server
 
-Pass the Gitea host and access token as command-line flags or environment variables, flags take precedence. Run `gitea-mcp --help` for the full list of flags and environment variables. Logs are written to `$HOME/.gitea-mcp/gitea-mcp.log`, add `-d` for debug logging.
+Copy the deployment example:
 
-### MCP protocol and HTTP transport
+```bash
+cp deploy/.env.example deploy/.env
+```
 
-The server supports MCP up to `2026-07-28` and negotiates down to the client's version, advertising only the `tools` capability. Tool and Gitea failures return a `tools/call` result with `result.isError: true`, while malformed requests and server faults stay JSON-RPC errors.
+Set at minimum:
 
-HTTP is always stateless: `/mcp` accepts POST only, without `Mcp-Session-Id`, standalone SSE or `Last-Event-ID` resumability. Origins are validated, and reverse proxies must forward `Mcp-Protocol-Version`, `Mcp-Method` and `Mcp-Name` unchanged. `Authorization: Bearer <token>` and `Authorization: token <token>` pass a Gitea credential per request, which is credential passthrough rather than MCP OAuth, unless OAuth mode is enabled, in which case gitea-mcp acts as an OAuth 2.1 authorization server; see [docs/oauth/SPEC.md](docs/oauth/SPEC.md).
+```text
+GITEA_HOST=https://git.example.com
+GITEA_OAUTH_CLIENT_ID=...
+GITEA_OAUTH_PUBLIC_URL=https://mcp.example.com
+GITEA_OAUTH_ALLOWED_USER=your-user
+```
 
-HTTP mode also serves `/healthz`, which returns `200 OK` when the server is up. The Docker image's built-in `HEALTHCHECK` runs `gitea-mcp -healthcheck`, which dials `http://127.0.0.1:<port>/healthz` using the same `-p`/`-port` value (or `8080` by default) and exits `0` on success or `1` on failure. Stdio deployments do not serve `/healthz`, so override or disable the image's `HEALTHCHECK` when running in stdio mode.
+Store the OAuth client secret and signing key using the provided Docker secret files.
+
+### 3. Start it
+
+```bash
+cd deploy
+docker compose up -d
+```
+
+The MCP endpoint is:
+
+```text
+https://mcp.example.com/mcp
+```
+
+### 4. Connect ChatGPT
+
+Create a custom MCP app/connector with:
+
+```text
+Server URL: https://mcp.example.com/mcp
+Authentication: OAuth
+```
+
+Complete the Gitea login flow.
+
+### 5. Connect Claude
+
+Add the same MCP endpoint as a custom connector and authenticate through Gitea.
+
+## ChatGPT callback note
+
+Recent ChatGPT connectors use a per-connector callback URI of the form:
+
+```text
+https://chatgpt.com/connector/oauth/<callback_id>
+```
+
+Your deployment must allow the callback URI pattern expected by the connector. See [`deploy/README.md`](deploy/README.md) for the current deployment details.
+
+## Deployment
+
+See [`deploy/README.md`](deploy/README.md) for the complete Docker, reverse-proxy, TLS, OAuth and troubleshooting guide.
+
+## How this differs from upstream
+
+This repository is based on the official Gitea MCP server:
+
+https://gitea.com/gitea/gitea-mcp
+
+The fork adds:
+
+- OAuth authorization-server functionality for web MCP clients
+- PKCE and dynamic client registration
+- web-client redirect compatibility
+- single-user authorization
+- hard read-only OAuth mode
+- OAuth-specific security tests
+- Docker/reverse-proxy deployment examples for remote MCP use
+
+The original Gitea MCP behavior is retained for local/PAT use where possible.
+
+## OAuth mode
+
+When OAuth mode is enabled, the server forces read-only operation. There is no configuration switch that enables write tools in OAuth mode.
+
+The OAuth-enabled server exposes the metadata and authorization endpoints needed by compatible web MCP clients while keeping upstream Gitea OAuth credentials on the server side.
+
+## MCP protocol and HTTP transport
+
+The server supports MCP up to `2026-07-28` and negotiates down to the client's version, advertising only the `tools` capability.
+
+HTTP is stateless. The MCP endpoint is:
+
+```text
+/mcp
+```
+
+In OAuth mode, `/mcp` is protected by MCP access tokens issued by this server.
+
+Outside OAuth mode, the original PAT-based HTTP and stdio behavior remains available.
+
+HTTP mode also serves:
+
+```text
+/healthz
+```
+
+The Docker image includes a built-in health check that runs:
+
+```text
+gitea-mcp -healthcheck
+```
+
+and verifies `http://127.0.0.1:<port>/healthz`.
+
+## Local / upstream-compatible usage
+
+For local clients and PAT-based workflows, the project retains the original Gitea MCP behavior.
 
 ### Claude Code
-
-Runs the server through `go run` and requires [Go](https://go.dev):
 
 ```bash
 claude mcp add --transport stdio --scope user gitea \
@@ -48,7 +198,7 @@ claude mcp add --transport stdio --scope user gitea \
 
 ### VS Code
 
-Use the install buttons at the top of this README, or add the block below to your User Settings (JSON), reachable via `Ctrl + Shift + P` and `Preferences: Open User Settings (JSON)`. It also works in a workspace `.vscode/mcp.json`, where the `mcp` key is omitted.
+The upstream-style local Docker setup remains available for PAT-based usage:
 
 ```json
 {
@@ -76,40 +226,22 @@ Use the install buttons at the top of this README, or add the block below to you
 
 ### OpenCode
 
-Add the following to the top-level `mcp` object of your [OpenCode](https://opencode.ai) config:
-
 ```json
-    "gitea-mcp": {
-      "enabled": true,
-      "type": "local",
-      "command": [
-        "gitea-mcp",
-        "-t", "stdio",
-        "-H", "https://gitea.com",
-        "-T", "<your personal access token>"
-      ]
-    }
-```
-
-### Mistral Vibe
-
-Add the following to `~/.vibe/config.toml`:
-
-```toml
-[[mcp_servers]]
-name = "gitea"
-transport = "stdio"
-command = "docker"
-args = ["run", "--rm", "-i", "-e", "GITEA_ACCESS_TOKEN", "-e", "GITEA_HOST", "docker.gitea.com/gitea-mcp-server"]
-
-[mcp_servers.env]
-GITEA_ACCESS_TOKEN = "TOKEN"
-GITEA_HOST = "https://gitea.com"
+"gitea-mcp": {
+  "enabled": true,
+  "type": "local",
+  "command": [
+    "gitea-mcp",
+    "-t", "stdio",
+    "-H", "https://gitea.com",
+    "-T", "<your personal access token>"
+  ]
+}
 ```
 
 ### Other clients
 
-Clients such as Cursor take either a stdio command:
+A local stdio configuration can look like:
 
 ```json
 {
@@ -125,7 +257,7 @@ Clients such as Cursor take either a stdio command:
 }
 ```
 
-or an http endpoint, for a server started with `gitea-mcp -t http --port 8080`:
+Or for non-OAuth HTTP mode:
 
 ```json
 {
@@ -140,7 +272,68 @@ or an http endpoint, for a server started with `gitea-mcp -t http --port 8080`:
 }
 ```
 
-Once configured, try `list all my repositories` in the chat box.
+## Installation and building
+
+### OAuth deployment
+
+OAuth mode requires building from this repository. See [`deploy/README.md`](deploy/README.md).
+
+### Build from source
+
+Requires Go 1.27 or later:
+
+```bash
+git clone https://github.com/wjk22/gitea-mcp-oauth.git
+cd gitea-mcp-oauth
+make install
+```
+
+### Upstream binaries and images
+
+If you only need the original local/PAT behavior, the official upstream project also publishes its own binaries and Docker image:
+
+https://gitea.com/gitea/gitea-mcp
+
+Those upstream artifacts do **not** include this fork's OAuth additions.
+
+## Configuration
+
+Pass the Gitea host and access token as command-line flags or environment variables; flags take precedence.
+
+Run:
+
+```bash
+gitea-mcp --help
+```
+
+for the full list of options.
+
+Logs are written to:
+
+```text
+$HOME/.gitea-mcp/gitea-mcp.log
+```
+
+Use `-d` for debug logging.
+
+## Tool filtering
+
+Tools with `Write` access are hidden when the server runs in read-only mode (`-r` / `GITEA_READONLY`).
+
+The exposed tool set can also be filtered by scope:
+
+```bash
+gitea-mcp -S issue,pull_request
+```
+
+or by individual tool name:
+
+```bash
+gitea-mcp --scope repository,branch --tools get_me
+```
+
+With neither filter set, every tool allowed by the active mode loads.
+
 
 ## Available Tools
 
@@ -212,3 +405,30 @@ gitea-mcp --scope repository,branch --tools get_me
 ```
 
 Many tools accept `page` and `per_page` for pagination. The maximum effective page size is the Gitea server's `[api].MAX_RESPONSE_ITEMS` setting (default **50**), larger values are silently capped.
+
+## Security notes
+
+The main security goals are:
+
+- Gitea tokens never leave the MCP server
+- OAuth mode is always read-only
+- web clients receive MCP tokens rather than upstream Gitea credentials
+- redirect URIs are validated
+- PKCE is required
+- only the configured Gitea user may authorize
+- read-only enforcement exists below the MCP tool layer
+- OAuth/PAT modes do not silently mix
+
+See [`docs/oauth/SPEC.md`](docs/oauth/SPEC.md) for the current design.
+
+## License
+
+This project is based on the official Gitea MCP server and remains licensed under the MIT License.
+
+See [`LICENSE`](LICENSE).
+
+## Upstream
+
+Official project:
+
+https://gitea.com/gitea/gitea-mcp
