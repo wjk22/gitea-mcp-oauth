@@ -1,6 +1,8 @@
-# gitea-mcp OAuth — Specification (Revision 4, minimal)
+# gitea-mcp OAuth — Specification (Revision 7)
 
 This document describes what the OAuth mode guarantees and what it deliberately does not do. Hardening that is not required here is listed in `docs/oauth/BACKLOG.md` and is deliberately not implemented.
+
+**Revision 5** adds shaped file reads (FR-1..FR-6) to reduce cost for AI clients. **Revision 6** adds handling of null and fractional numeric arguments (FR-7, FR-7a, FR-7b) and strengthens related tests (T-FR-1, T-FR-4, T-FR-5, T-FR-8, T-FR-9). **Revision 7** adds directory listing of the repository root (DR-1..DR-3, T-DR-1..T-DR-3).
 
 ## Goal
 
@@ -69,6 +71,24 @@ Persistence across restarts (a restart means reconnecting the connector), consen
 
 - **LOG-1** Never log `Authorization`, `Cookie`, `Set-Cookie`, request bodies of `/oauth/*`, or query strings of `/oauth/*`.
 
+### File reading (Revision 5)
+
+- **FR-1 Decoded text.** For a text file, `content` is UTF-8 text, never base64. The response contains `name`, `path`, `sha`, `type`, `size`, `content` and the range fields of FR-3. It contains no `encoding`, `html_url` or `download_url`.
+- **FR-2 Binary.** A file is binary if the first 8000 bytes contain a NUL byte or the content is not valid UTF-8. For a binary file the response has no `content`, has `binary: true`, keeps `name`, `path`, `sha`, `type`, `size`, and is not an error.
+- **FR-3 Line range.** `start_line` (default 1) and `end_line` (default last line) are 1-based and inclusive. The response reports `total_lines` and the range actually returned as `start_line` and `end_line`. A trailing newline does not add an extra line. `end_line` beyond the file is clamped. These are tool errors with a clear message: `start_line` < 1; `end_line` < `start_line`; `start_line` > `total_lines` (the message names `total_lines`). An empty file returns `total_lines: 0` and empty `content` without error.
+- **FR-4 Size cap.** `max_bytes` (default 32768, maximum 262144, larger values are clamped, values < 1 are an error) limits the returned `content` after range selection. If the selection is larger, cut after the last complete line that fits and set `truncated: true` and `next_start_line` to the first line not returned; `end_line` then reports the last line returned. If the first line alone exceeds the cap, cut at a valid UTF-8 boundary, set `truncated: true`, and omit `next_start_line`. Never cut inside a UTF-8 character.
+- **FR-5 Line numbers.** With `withLines=true` each returned line is prefixed with its original line number and a tab (`N<TAB>text`). Numbers refer to the original file even when a range is requested. The JSON-array-of-objects format is removed. The cap of FR-4 applies to the emitted content including prefixes.
+- **FR-6 Nothing else changes.** Tool name, required parameters, read-only classification and the output of every other tool stay as they are. If Gitea returns no content for the path (directory, submodule, symlink, oversized blob), the response is metadata only, as today, and not an error.
+- **FR-7 Optional numeric arguments.** For `start_line`, `end_line` and `max_bytes`: an absent key or a JSON `null` means "not given" and behaves exactly as if the key were absent. A whole number is accepted, including a `float64` with no fractional part (`40`, `40.0`). A numeric string is accepted as today. A number with a fractional part (`1.5`), `NaN`, an infinity, or a value outside the range of `int` is an error that names the parameter. Any other type is an error that names the parameter. Range rules of FR-3 and FR-4 are unchanged.
+- **FR-7a Upper bound.** A numeric argument given as a `float64` at or above 2^63 is an error that names the parameter and says `out of range`, exactly like other out-of-range values. `float64(math.MaxInt)` rounds up to 2^63, so the bound is compared with `>=`.
+- **FR-7b Native int bounds.** A numeric argument (`float64` or numeric string) must fit in the platform's `int`. A whole number in `[-2^(IntSize-1), 2^(IntSize-1)-1]` is accepted; a whole number outside that range is an error that names the parameter and says `out of range`. This holds on every architecture (`strconv.IntSize` gives the width). Fractions, NaN, infinities and non-numeric strings keep their errors from FR-7.
+
+### Directory listing (Revision 7)
+
+- **DR-1 Root listing.** For `get_dir_contents`, `path` is optional. Omitted, empty, `/` and `.` all mean the repository root. Any other value is used as today.
+- **DR-2 Same output.** A root listing has the same shape as any other directory listing (`name`, `path`, `type`, `size` per entry, as produced by `slimDirEntries`).
+- **DR-3 Nothing else changes.** `get_file_contents` still requires a non-empty `path` and still fails with the current error when it is missing. The read-only classification, all other tools and `params.GetString` are unchanged.
+
 ## Read-Only Enforcement
 
 OAuth mode forces read-only.
@@ -102,6 +122,18 @@ OAuth mode forces read-only.
 | T-RO-OAUTH | OAuth-mode tool set equals `oauth_tools.golden` | Pass |
 | T-LOG-1 | Full flow with debug logging | No token, code, secret or verifier in logs |
 | T-E2E | Happy path through a fake Gitea: register → authorize → callback → token → tool call | Tool result returned |
+| T-FR-1 | Multi-line UTF-8 fixture round-trips through `ShapeFileContent`: base64 in, identical text out; `FormatFileContentResult` map has no `encoding`, `html_url`, `download_url` (handler-level assertions in T-FR-8) | Pass |
+| T-FR-2 | Fixture with NUL byte and fixture with invalid UTF-8 | `binary: true`, no `content`, no error |
+| T-FR-3 | Whole file, middle range, clamped end, start beyond end, start < 1, end < start, newlines, empty file | As stated |
+| T-FR-4 | File larger than `max_bytes` pages correctly with round-trip byte-equality for several cap values (37, 100, 150, 400); multi-byte boundary cut; defaults, maximum, cap < 1 | As stated |
+| T-FR-5 | Line prefix format `N<TAB>text`; range numbering; cap counts prefixes (proven: `max_bytes=20` on two `12345678\n` lines truncates with prefixes but not without) | As stated |
+| T-FR-6 | `get_dir_contents` byte-identical; nil-content yields metadata only; read-only tests pass | Pass |
+| T-FR-7 | Tool schema differs only by the three new optional parameters, not in `required` | Pass |
+| T-FR-8 | FR-7 and FR-7a, handler level: `float64` args accepted; `null` args treated as absent; output has no `encoding`, `html_url`, `download_url`; a numeric string gives the same result as the float form. Every rejected value (fractional `start_line`/`end_line`/`max_bytes`, `NaN`, infinity, `1e30`, `float64(1<<63)`, a boolean, a non-numeric string) is asserted to set `IsError`, to name the parameter, to say `whole number` or `out of range`, and not to return a shaped file response | Pass |
+| T-FR-9 | FR-7b at helper level (`getOptionalFileArg`), table-driven, expectations per `strconv.IntSize`; run under `GOARCH=386` and native | Accepted values returned, out-of-range values error naming the parameter |
+| T-DR-1 | `get_dir_contents` with `path` omitted, `""`, `"/"`, `.`, handler level against a stub | Exactly one request to the root contents endpoint each (path asserted); slim listing |
+| T-DR-2 | `get_dir_contents` with `docs/oauth` | Same request as before (nested contents endpoint) |
+| T-DR-3 | `get_dir_contents` schema; `get_file_contents` with empty `path` | Only `path` no longer required; "path is required" error kept |
 
 ## Deployment
 

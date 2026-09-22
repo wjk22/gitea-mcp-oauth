@@ -123,35 +123,23 @@ curl -i https://mcp.example.com/mcp
 2. Log in to Gitea when prompted and authorize.
 3. Claude uses `https://claude.ai/api/mcp/auth_callback` or `https://claude.com/api/mcp/auth_callback`; both must be in `GITEA_OAUTH_ALLOWED_REDIRECT_URIS`.
 
-### ChatGPT support
+### ChatGPT
 
-ChatGPT works **end to end** (tested on ChatGPT Plus with developer mode enabled).
+Works end to end on ChatGPT Plus with developer mode enabled (Settings → Apps & Connectors → Advanced → Developer mode; ChatGPT may move this location).
 
-#### Developer Mode Requirement
-
-To connect custom MCP servers, developer mode must be turned on in ChatGPT:
-**Settings → Apps & Connectors → Advanced → Developer mode** (the exact menu path is shown by ChatGPT and may change over time).
-
-#### Known Differences and Notes
-
-- **Per-connector callback URI:** New ChatGPT connectors use a per-connector callback `https://chatgpt.com/connector/oauth/<callback_id>`, which must be added to `GITEA_OAUTH_ALLOWED_REDIRECT_URIS`.
-- **Client registration:** ChatGPT may use a Client ID Metadata Document (CIMD, a URL-based `client_id`) instead of Dynamic Client Registration (DCR); this server supports DCR only (ChatGPT used DCR in testing).
-
-#### Setup Flow
-
-1. In ChatGPT, add a custom connector with URL `https://mcp.example.com/mcp` and OAuth.
-2. The initial registration attempt fails with `invalid_redirect_uri` and displays the exact callback URI (`https://chatgpt.com/connector/oauth/<callback_id>`).
-3. Append that exact URI to `GITEA_OAUTH_ALLOWED_REDIRECT_URIS` in `.env`:
+1. Create a connector with URL `https://mcp.example.com/mcp` and OAuth authentication.
+2. The first attempt fails with `invalid_redirect_uri` and shows the exact callback URI `https://chatgpt.com/connector/oauth/<callback_id>`. Append it to `GITEA_OAUTH_ALLOWED_REDIRECT_URIS` in `.env`:
    ```bash
    GITEA_OAUTH_ALLOWED_REDIRECT_URIS=https://claude.ai/api/mcp/auth_callback,https://claude.com/api/mcp/auth_callback,https://chatgpt.com/connector/oauth/<callback_id>
    ```
-4. Recreate the container:
-   ```bash
-   docker compose up -d
-   ```
-   *Note:* Recreating the container clears in-memory sessions; any other connected clients (e.g. Claude) will need to reconnect.
-5. Retry adding the connector in ChatGPT. Complete authorization in Gitea; the connector will connect and list repositories.
-6. The callback ID belongs to that specific connector; creating a new connector gets a new ID. Unused IDs can be pruned from `GITEA_OAUTH_ALLOWED_REDIRECT_URIS` later.
+3. Apply the change: `docker compose up -d`.
+4. Retry the connector; complete the authorization in ChatGPT.
+
+The callback ID belongs to that connector. A newly created connector gets a new ID that must be added the same way; IDs of deleted connectors can be removed from the list later.
+
+Recreating the container clears all sessions, so other connected clients (e.g. Claude) must reconnect.
+
+ChatGPT used Dynamic Client Registration in this test; Client ID Metadata Documents (CIMD) are not supported, see Troubleshooting.
 
 ---
 
@@ -189,3 +177,9 @@ Read scopes were verified on Gitea 1.27.3 with the scope probe in `test/scope-pr
 - [ ] **Restart:** `docker compose restart`; the next tool call fails with an auth error; reconnect works.
 - [ ] **Other user:** authorizing while logged in to Gitea as a different account is rejected.
 - [ ] **Logs:** `/var/log/apache2/gitmcp_access.log` shows no query strings (`?code=`, `?state=`) and no token values; `docker compose logs` shows no tokens, codes or secrets.
+- [ ] **File read range:** read a large file with `start_line=1`, `end_line=40`: exactly 40 lines, `total_lines` present.
+- [ ] **File read cap:** read the same large file with no range: `truncated: true` and a `next_start_line` that continues correctly.
+- [ ] **File read text:** read a small file: plain text, no `encoding`, no `html_url`, no `download_url`.
+- [ ] **Reconnect after redeploy:** reconnect the connector in claude.ai and ChatGPT so they pick up the new `get_dir_contents` schema.
+- [ ] **Directory root:** `get_dir_contents` on a repo with no `path`: the top-level entries are listed.
+- [ ] **Directory subdirectory:** `get_dir_contents` with `path` set to a subdirectory: unchanged behaviour.

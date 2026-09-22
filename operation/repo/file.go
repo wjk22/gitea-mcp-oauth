@@ -1,13 +1,13 @@
 package repo
 
 import (
-	"bufio"
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
+	"strconv"
 
 	"gitea.com/gitea/gitea-mcp/pkg/annotation"
 	"gitea.com/gitea/gitea-mcp/pkg/gitea"
@@ -39,6 +39,9 @@ var (
 		tool.String("ref", tool.Required(), tool.Description("branch, tag, or commit SHA")),
 		tool.String("path", tool.Required()),
 		tool.Boolean("withLines", tool.Description("return numbered lines")),
+		tool.Number("start_line", tool.Description("1-based start line whole number (inclusive, default 1)")),
+		tool.Number("end_line", tool.Description("1-based end line whole number (inclusive, default last line). Clamped if beyond file")),
+		tool.Number("max_bytes", tool.Description("maximum content bytes to return as a whole number (default 32768, maximum 262144, larger clamped). Truncates after last complete line that fits with truncated: true and next_start_line; cuts at UTF-8 boundary if first line exceeds")),
 	)
 
 	GetDirContentTool = tool.NewDefinition(
@@ -48,7 +51,7 @@ var (
 		tool.String("owner", tool.Required(), tool.Description(params.OwnerDesc)),
 		tool.String("repo", tool.Required(), tool.Description(params.RepoDesc)),
 		tool.String("ref", tool.Required(), tool.Description("branch, tag, or commit SHA")),
-		tool.String("path", tool.Required()),
+		tool.String("path", tool.Description("directory path; omit for the repository root")),
 	)
 
 	CreateOrUpdateFileTool = tool.NewDefinition(
@@ -101,11 +104,6 @@ func init() {
 	})
 }
 
-type ContentLine struct {
-	LineNumber int    `json:"line"`
-	Content    string `json:"content"`
-}
-
 func GetFileContentFn(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	owner, err := params.GetString(args, "owner")
 	if err != nil {
@@ -128,44 +126,84 @@ func GetFileContentFn(ctx context.Context, args map[string]any) (*mcp.CallToolRe
 	if err != nil {
 		return to.ErrorResult(fmt.Errorf("get file err: %v", err))
 	}
-	withLines, _ := args["withLines"].(bool)
-	if withLines {
-		rawContent, err := base64.StdEncoding.DecodeString(*content.Content)
-		if err != nil {
-			return to.ErrorResult(fmt.Errorf("decode base64 content err: %v", err))
-		}
-
-		contentLines := make([]ContentLine, 0)
-		line := 0
-
-		scanner := bufio.NewScanner(bytes.NewReader(rawContent))
-
-		for scanner.Scan() {
-			line++
-
-			contentLines = append(contentLines, ContentLine{
-				LineNumber: line,
-				Content:    scanner.Text(),
-			})
-		}
-		if err := scanner.Err(); err != nil {
-			return to.ErrorResult(fmt.Errorf("scan content err: %v", err))
-		}
-
-		// remove the last blank line if exists
-		// git does not consider the last line as a new line
-		if len(contentLines) > 0 && contentLines[len(contentLines)-1].Content == "" {
-			contentLines = contentLines[:len(contentLines)-1]
-		}
-
-		contentBytes, err := json.MarshalIndent(contentLines, "", "  ")
-		if err != nil {
-			return to.ErrorResult(fmt.Errorf("marshal content lines err: %v", err))
-		}
-		contentStr := string(contentBytes)
-		content.Content = &contentStr
+	if content == nil {
+		return to.ErrorResult(errors.New("file not found"))
 	}
-	return to.TextResult(slimContents(content))
+	if content.Content == nil {
+		// FR-6: nil-content response yields metadata only
+		return to.TextResult(map[string]any{
+			"name": content.Name,
+			"path": content.Path,
+			"sha":  content.SHA,
+			"type": content.Type,
+			"size": content.Size,
+		})
+	}
+
+	withLines, _ := args["withLines"].(bool)
+	opts := ShapeOptions{
+		WithLines: withLines,
+	}
+
+	startLine, err := getOptionalFileArg(args, "start_line")
+	if err != nil {
+		return to.ErrorResult(err)
+	}
+	opts.StartLine = startLine
+
+	endLine, err := getOptionalFileArg(args, "end_line")
+	if err != nil {
+		return to.ErrorResult(err)
+	}
+	opts.EndLine = endLine
+
+	maxBytes, err := getOptionalFileArg(args, "max_bytes")
+	if err != nil {
+		return to.ErrorResult(err)
+	}
+	opts.MaxBytes = maxBytes
+
+	shaped, err := ShapeFileContent([]byte(*content.Content), opts)
+	if err != nil {
+		return to.ErrorResult(err)
+	}
+
+	return to.TextResult(FormatFileContentResult(content.Name, content.Path, content.SHA, content.Type, content.Size, shaped))
+}
+
+// getOptionalFileArg reads one optional integer argument from args for GetFileContentFn.
+// Absent key or JSON null → nil (FR-7: treated as not given).
+// float64 with no fractional part, or numeric string → *int.
+// float64 with fractional part, NaN, Inf, magnitude at or above 2^63, or any other type → error naming the parameter.
+func getOptionalFileArg(args map[string]any, key string) (*int, error) {
+	val, exists := args[key]
+	if !exists || val == nil { // absent or explicit null
+		return nil, nil //nolint:nilnil // nil pointer = "not given", nil error = no error: intentional contract
+	}
+	switch v := val.(type) {
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) {
+			return nil, fmt.Errorf("%s must be a whole number (got %v)", key, v)
+		}
+		const limit = float64(1 << (strconv.IntSize - 1)) // exact power of two on 32 and 64 bit; float64(math.MaxInt) is not
+		if v < -limit || v >= limit {
+			return nil, fmt.Errorf("%s value out of range (got %v)", key, v)
+		}
+		i := int(v)
+		return &i, nil
+	case string:
+		i, err := strconv.ParseInt(v, 10, strconv.IntSize)
+		if errors.Is(err, strconv.ErrRange) {
+			return nil, fmt.Errorf("%s value out of range (got %q)", key, v)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s must be a whole number (got %q)", key, v)
+		}
+		intVal := int(i)
+		return &intVal, nil
+	default:
+		return nil, fmt.Errorf("%s must be a whole number, got %T", key, val)
+	}
 }
 
 func GetDirContentFn(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
@@ -178,15 +216,15 @@ func GetDirContentFn(ctx context.Context, args map[string]any) (*mcp.CallToolRes
 		return to.ErrorResult(err)
 	}
 	ref, _ := args["ref"].(string)
-	filePath, err := params.GetString(args, "path")
-	if err != nil {
-		return to.ErrorResult(err)
+	dirPath := params.GetOptionalString(args, "path", "")
+	if dirPath == "/" || dirPath == "." {
+		dirPath = "" // Gitea rejects "contents/." with 400; "" lists the root
 	}
 	client, err := gitea.ClientFromContext(ctx)
 	if err != nil {
 		return to.ErrorResult(fmt.Errorf("get gitea client err: %v", err))
 	}
-	content, _, err := client.Repositories.ListContents(ctx, owner, repo, ref, filePath)
+	content, _, err := client.Repositories.ListContents(ctx, owner, repo, ref, dirPath)
 	if err != nil {
 		return to.ErrorResult(fmt.Errorf("get dir content err: %v", err))
 	}
